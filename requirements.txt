@@ -3,3 +3,5 @@ Flask-Cors
 requests
 beautifulsoup4
 urllib3
+gunicorn # Necesario para correr la aplicación web en Render
+
