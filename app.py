@@ -8,7 +8,9 @@ from flask import Flask, jsonify
 
 app = Flask(__name__)
 
-# --- CONFIGURACIÓN BÁSICA ---
+# --- CONFIGURACIÓN ---
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 LOGIN_URL = "https://sistema.grupoargus.co.cr/login.aspx"
 AGENDA_URL = "https://sistema.grupoargus.co.cr/citas.aspx"
 
@@ -18,62 +20,132 @@ CRED = {
     "cmd_ingresar": "Ingresar"
 }
 
-HORAS_VALIDAS = [
-    "08:00", "09:00", "10:00", "11:00", "12:00",
-    "13:00", "14:00", "15:00", "16:00", "17:00"
-]
+# Generar horarios válidos cada 30 minutos (7:00 a 18:30)
+HORAS_VALIDAS = []
+for h in range(7, 19):
+    for m in (0, 30):
+        sufijo = "a. m." if h < 12 else "p. m."
+        hh = h if h <= 12 else h - 12
+        HORAS_VALIDAS.append(f"{hh}:{m:02d} {sufijo}")
 
 # --- FUNCIONES AUXILIARES ---
-def normalizar_hora(texto):
-    match = re.search(r"(\d{1,2}:\d{2})", texto)
-    return match.group(1) if match else None
+def normalizar_hora(hora):
+    hora = hora.lower()
+    hora = hora.replace("am", "a. m.").replace("pm", "p. m.")
+    hora = hora.replace("a.m.", "a. m.").replace("p.m.", "p. m.")
+    hora = re.sub(r"\s+", " ", hora.strip())
+    return hora
 
 def es_hora_valida(hora):
-    return hora in HORAS_VALIDAS
+    return bool(re.search(r":00|:30", hora))
 
 # --- FUNCIÓN PRINCIPAL ---
 def obtener_disponibilidad():
     session = requests.Session()
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     try:
         # --- LOGIN ---
-        response = session.post(LOGIN_URL, data=CRED, verify=False, timeout=15)
-        response.raise_for_status()
+        r = session.get(LOGIN_URL, verify=False, timeout=15)
+        soup = BeautifulSoup(r.text, "html.parser")
+        hidden = {tag["name"]: tag.get("value", "") for tag in soup.find_all("input", type="hidden")}
+        CRED.update(hidden)
 
-        # Verifica que el login fue exitoso (depende del HTML real)
-        if "login" in response.url.lower():
-            raise Exception("No se pudo iniciar sesión, verifique credenciales o URL.")
+        resp = session.post(LOGIN_URL, data=CRED, verify=False, timeout=15)
+        if "citas" not in resp.text and "Cerrar Sesión" not in resp.text:
+            raise Exception("No se pudo iniciar sesión. Verifica credenciales o estructura del login.")
 
-        # --- OBTENER AGENDA ---
-        agenda_page = session.get(AGENDA_URL, verify=False, timeout=15)
-        agenda_page.raise_for_status()
+        # --- AGENDA ---
+        agenda = session.get(AGENDA_URL, verify=False, timeout=15)
+        soup = BeautifulSoup(agenda.text, "html.parser")
 
-        soup = BeautifulSoup(agenda_page.text, 'html.parser')
+        table = soup.find("table", {"id": "MainContent_grid_datos"}) or soup.find("table", class_="grid_age")
+        if not table:
+            raise Exception("No se encontró la tabla de agenda en la página.")
 
-        # --- PARSEAR DATOS ---
-        disponibles_por_doctor = {}
-        for fila in soup.select("table.agenda tr"):
-            columnas = fila.find_all("td")
-            if len(columnas) >= 2:
-                doctor = columnas[0].get_text(strip=True)
-                hora = normalizar_hora(columnas[1].get_text(strip=True))
-                if doctor and hora and es_hora_valida(hora):
-                    disponibles_por_doctor.setdefault(doctor, []).append(hora)
+        # --- DETECTAR DOCTORES ---
+        header = None
+        for tr in table.find_all("tr"):
+            texts = [td.get_text(strip=True) for td in tr.find_all("td")]
+            if any("Dr." in t or "Examenes" in t or "Citas" in t for t in texts):
+                header = tr
+                break
 
-        # Si no se encontraron datos, lanza excepción
-        if not disponibles_por_doctor:
-            raise Exception("No se encontraron espacios disponibles o estructura de HTML cambió.")
+        cols = header.find_all("td")[1:]
+        doctores = [td.get_text(strip=True) for td in cols]
 
-        return disponibles_por_doctor
+        disponibles_por_doctor = {doc: [] for doc in doctores}
+        ocupado_horas = {doc: set() for doc in doctores}
+        rows = table.find_all("tr")
+        active_rowspans = [0] * len(doctores)
+
+        # --- PROCESAR FILAS DE AGENDA ---
+        for tr in rows:
+            tds = tr.find_all("td")
+            if len(tds) <= 1:
+                continue
+
+            hora_texto = normalizar_hora(tds[0].get_text(strip=True))
+            if hora_texto not in HORAS_VALIDAS:
+                continue
+
+            hora_actual = hora_texto
+            tds = tds[1:]
+            col_index = 0
+
+            for td in tds:
+                while col_index < len(active_rowspans) and active_rowspans[col_index] > 0:
+                    active_rowspans[col_index] -= 1
+                    col_index += 1
+                if col_index >= len(doctores):
+                    break
+
+                doctor_columna = doctores[col_index]
+                rowspan = int(td.get("rowspan", "1"))
+                boton = td.find("input", {"type": "submit"})
+
+                if boton:
+                    value = boton.get("value", "").strip()
+                    title = boton.get("title", "").strip()
+                    texto_boton = title if title else value
+
+                    if "Disponible" in texto_boton:
+                        hora_del_boton = None
+                        match_boton = re.search(r"(\d{1,2}:\d{2}\s+[ap]\.\s*m\.)", texto_boton)
+                        if match_boton:
+                            hora_del_boton = normalizar_hora(match_boton.group(1))
+                            if not es_hora_valida(hora_del_boton):
+                                continue
+                        else:
+                            hora_del_boton = hora_actual
+
+                        doctor_asignado = None
+                        for doc_key in doctores:
+                            if doc_key in title:
+                                doctor_asignado = doc_key
+                                break
+
+                        if doctor_asignado is None:
+                            doctor_asignado = doctor_columna
+
+                        if doctor_asignado in disponibles_por_doctor:
+                            disponibles_por_doctor[doctor_asignado].append(f"{hora_actual} - {title}")
+
+                active_rowspans[col_index] = rowspan - 1
+                col_index += 1
+
+        # --- FILTRAR Y RETORNAR ---
+        disponibles_final = {
+            doc: [d for d in lista if es_hora_valida(d.split(" - ")[0])]
+            for doc, lista in disponibles_por_doctor.items()
+        }
+        return disponibles_final
 
     except Exception as e:
-        # Fallback: modo mock si falla la conexión o scraping
-        print(f"[WARN] Scraping falló: {e}. Usando datos simulados.")
+        print(f"[WARN] Scraping falló: {e}")
+        # --- Fallback: datos simulados ---
         return {
-            "Dr. Pérez": ["09:00", "10:00", "11:00"],
-            "Dra. Gómez": ["14:00", "15:00"],
-            "Dr. Ramírez": ["08:00", "12:00", "16:00"]
+            "Dr. Pérez": ["09:00 a. m. - Disponible", "10:30 a. m. - Disponible"],
+            "Dra. Gómez": ["02:00 p. m. - Disponible"],
         }
 
 # --- ENDPOINT API ---
