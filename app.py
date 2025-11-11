@@ -1,40 +1,65 @@
-# app.py (ejemplo de cómo se vería el inicio del script con Flask)
 from bs4 import BeautifulSoup
 import requests
 import urllib3
 import json
 import re
-from flask import Flask, jsonify # Importar Flask y jsonify
-
-# ... (Mantén todas tus variables y funciones auxiliares: LOGIN_URL, AGENDA_URL, CRED, HORAS_VALIDAS, normalizar_hora, es_hora_valida) ...
+import os
+from flask import Flask, jsonify
 
 app = Flask(__name__)
 
-# Función principal que contiene toda la lógica de scraping
+# --- CONFIGURACIÓN BÁSICA ---
+LOGIN_URL = "https://tusitio.com/login"      # Cambia esto por la URL real
+AGENDA_URL = "https://tusitio.com/agenda"    # Cambia esto por la URL real
+CRED = {"username": "USUARIO", "password": "CONTRASEÑA"}  # Credenciales
+
+# Horas válidas (ajusta según tu caso)
+HORAS_VALIDAS = ["08:00", "09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00"]
+
+# --- FUNCIONES AUXILIARES ---
+def normalizar_hora(texto):
+    """Limpia y estandariza el formato de hora."""
+    match = re.search(r"(\d{1,2}:\d{2})", texto)
+    return match.group(1) if match else None
+
+def es_hora_valida(hora):
+    return hora in HORAS_VALIDAS
+
+# --- FUNCIÓN PRINCIPAL ---
 def obtener_disponibilidad():
+    session = requests.Session()
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
     # --- LOGIN ---
-    # ... (Tu lógica de login) ...
-    
-    # --- OBTENER TABLA DE AGENDA ---
-    # ... (Tu lógica para obtener la tabla y doctores) ...
+    try:
+        response = session.post(LOGIN_URL, data=CRED, verify=False)
+        response.raise_for_status()
+    except Exception as e:
+        raise Exception(f"Error al iniciar sesión: {e}")
 
-    # --- MAPA DE DISPONIBILIDAD (CORREGIDO) ---
-    # ... (Tu lógica para iterar la tabla y obtener disponibles_por_doctor) ...
+    # --- OBTENER AGENDA ---
+    try:
+        agenda_page = session.get(AGENDA_URL, verify=False)
+        agenda_page.raise_for_status()
+        soup = BeautifulSoup(agenda_page.text, 'html.parser')
+    except Exception as e:
+        raise Exception(f"Error al obtener la agenda: {e}")
 
-    # --- FILTRAR Y DEVOLVER ---
-    # En lugar de imprimir y guardar el JSON, simplemente devuélvelo.
-    disponibles_final = {
-        doc: [d for d in lista if es_hora_valida(d.split(" - ")[0])]
-        for doc, lista in disponibles_por_doctor.items()
-    }
-    
-    # Opcional: Si quieres un resumen más limpio para el bot
-    resumen_disponibilidad = {}
-    for doc, espacios in disponibles_final.items():
-        resumen_disponibilidad[doc] = [s.split(" - ")[0] for s in espacios]
+    # --- PARSEAR DATOS ---
+    disponibles_por_doctor = {}
 
-    return resumen_disponibilidad
+    # Ejemplo de scraping: ajusta esto según el HTML real
+    for fila in soup.select("table.agenda tr"):
+        columnas = fila.find_all("td")
+        if len(columnas) >= 2:
+            doctor = columnas[0].get_text(strip=True)
+            hora = normalizar_hora(columnas[1].get_text(strip=True))
+            if doctor and hora and es_hora_valida(hora):
+                disponibles_por_doctor.setdefault(doctor, []).append(hora)
 
+    return disponibles_por_doctor
+
+# --- ENDPOINT API ---
 @app.route('/api/disponibilidad', methods=['GET'])
 def disponibilidad_endpoint():
     try:
@@ -45,12 +70,13 @@ def disponibilidad_endpoint():
             "message": "Disponibilidad obtenida correctamente."
         }), 200
     except Exception as e:
-        # Esto es importante para el debugging en Render
         return jsonify({
             "status": "error",
             "message": f"Error al obtener disponibilidad: {str(e)}"
         }), 500
 
+# --- MAIN ---
 if __name__ == '__main__':
-    # Usar el puerto 10000 o el que Render asigne (se usará Gunicorn en producción)
-    app.run(debug=True, port=8000)
+    # Render asigna dinámicamente el puerto en la variable PORT
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host="0.0.0.0", port=port)
