@@ -13,8 +13,8 @@ CORS(app)
 LOGIN_URL = "https://sistema.grupoargus.co.cr/login.aspx"
 AGENDA_URL = "https://sistema.grupoargus.co.cr/citas.aspx"
 CRED = {
-    "txt_login": "L.gutierrez",
-    "txt_password": "LgLxmed23",
+    "txt_login": "*******",
+    "txt_password": "************",
     "cmd_ingresar": "Ingresar"
 }
 
@@ -182,3 +182,4 @@ def disponibilidad_por_doctor(doctor):
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
+
