@@ -152,6 +152,84 @@ def disponibilidad_por_doctor(doctor):
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# --- ENDPOINT SIMPLIFICADO PARA VAPI ---
+@app.route('/api/disponibilidad/vapi', methods=['GET'])
+def disponibilidad_vapi():
+    """
+    Endpoint simplificado para VAPI con estructura predecible
+    """
+    try:
+        data = obtener_disponibilidad()
+        
+        # Convertir a lista de objetos con estructura fija
+        resultado = []
+        for doctor, horarios in data.items():
+            if horarios:  # Solo incluir doctores con disponibilidad
+                resultado.append({
+                    "doctor": doctor,
+                    "horarios_disponibles": horarios,
+                    "cantidad": len(horarios)
+                })
+        
+        # Ordenar por cantidad de horarios disponibles (más opciones primero)
+        resultado.sort(key=lambda x: x["cantidad"], reverse=True)
+        
+        return jsonify({
+            "success": True,
+            "total_doctores": len(resultado),
+            "disponibilidad": resultado
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "disponibilidad": []
+        }), 500
+
+# --- ENDPOINT VAPI PARA DOCTOR ESPECÍFICO ---
+@app.route('/api/disponibilidad/vapi/<doctor_nombre>', methods=['GET'])
+def disponibilidad_vapi_doctor(doctor_nombre):
+    """
+    Endpoint para consultar un doctor específico con estructura simple
+    """
+    try:
+        data = obtener_disponibilidad()
+        doctor_nombre = doctor_nombre.replace("_", " ").replace("-", " ")
+        
+        # Buscar el doctor (case insensitive)
+        doctor_encontrado = None
+        horarios = []
+        
+        for doc, hrs in data.items():
+            if doctor_nombre.lower() in doc.lower():
+                doctor_encontrado = doc
+                horarios = hrs
+                break
+        
+        if not doctor_encontrado:
+            return jsonify({
+                "success": False,
+                "error": f"Doctor '{doctor_nombre}' no encontrado",
+                "doctor": None,
+                "horarios_disponibles": []
+            }), 404
+        
+        return jsonify({
+            "success": True,
+            "doctor": doctor_encontrado,
+            "horarios_disponibles": horarios,
+            "cantidad": len(horarios)
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "doctor": None,
+            "horarios_disponibles": []
+        }), 500
+
 # --- MAIN ---
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8000))
