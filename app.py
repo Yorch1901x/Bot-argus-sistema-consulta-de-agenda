@@ -3,9 +3,9 @@ from flask_cors import CORS
 from bs4 import BeautifulSoup
 import requests
 import urllib3
+import json
 import re
 import os
-from datetime import datetime
 
 app = Flask(__name__)
 CORS(app)
@@ -13,8 +13,8 @@ CORS(app)
 LOGIN_URL = "https://sistema.grupoargus.co.cr/login.aspx"
 AGENDA_URL = "https://sistema.grupoargus.co.cr/citas.aspx"
 CRED = {
-    "txt_login": "*******",
-    "txt_password": "************",
+    "txt_login": "L.gutierrez",
+    "txt_password": "LgLxmed23",
     "cmd_ingresar": "Ingresar"
 }
 
@@ -26,6 +26,7 @@ for h in range(7, 19):
         hh = h if h <= 12 else h - 12
         HORAS_VALIDAS.append(f"{hh}:{m:02d} {sufijo}")
 
+# --- FUNCIONES ---
 def normalizar_hora(hora):
     hora = hora.lower()
     hora = hora.replace("am", "a. m.").replace("pm", "p. m.")
@@ -36,10 +37,8 @@ def normalizar_hora(hora):
 def es_hora_valida(hora):
     return bool(re.search(r":00|:30", hora))
 
-def obtener_disponibilidad(fecha=None):
-    """
-    Consulta la disponibilidad en el sistema real de Grupo Argus para la fecha indicada.
-    """
+# --- SCRAPING ---
+def obtener_disponibilidad():
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     session = requests.Session()
 
@@ -51,40 +50,16 @@ def obtener_disponibilidad(fecha=None):
     cred.update(hidden)
     resp = session.post(LOGIN_URL, data=cred, verify=False)
     if "citas" not in resp.text and "Cerrar Sesión" not in resp.text:
-        raise Exception("No se pudo iniciar sesión en el sistema Argus")
+        raise Exception("No se pudo iniciar sesión")
 
-    # --- FECHA A CONSULTAR ---
-    if not fecha:
-        fecha = datetime.now().strftime("%Y-%m-%d")
-    try:
-        fecha_obj = datetime.strptime(fecha, "%Y-%m-%d")
-    except ValueError:
-        raise Exception("Formato de fecha inválido. Usa YYYY-MM-DD.")
-
-    fecha_formateada = fecha_obj.strftime("%d/%m/%Y")
-
-    # --- OBTENER ESTADO DE LA PÁGINA ---
-    pagina = session.get(AGENDA_URL, verify=False)
-    soup = BeautifulSoup(pagina.text, "html.parser")
-    state_data = {tag["name"]: tag.get("value", "") for tag in soup.find_all("input", type="hidden")}
-
-    # --- ARMAR PAYLOAD DE BÚSQUEDA CON FECHA ---
-    # Esto simula presionar "Buscar" en la web
-    payload = {
-        **state_data,
-        "ctl00$MainContent$txt_fecha": fecha_formateada,
-        "ctl00$MainContent$cmd_buscar": "Buscar"
-    }
-
-    # --- PETICIÓN DE AGENDA ---
-    agenda = session.post(AGENDA_URL, data=payload, verify=False)
+    # --- TABLA ---
+    agenda = session.get(AGENDA_URL, verify=False)
     soup = BeautifulSoup(agenda.text, "html.parser")
-
     table = soup.find("table", {"id": "MainContent_grid_datos"}) or soup.find("table", class_="grid_age")
     if not table:
-        raise Exception(f"No se encontró disponibilidad para la fecha {fecha_formateada}")
+        raise Exception("No se encontró la tabla de agenda")
 
-    # --- DETECTAR DOCTORES ---
+    # --- DOCTORES ---
     header = None
     for tr in table.find_all("tr"):
         texts = [td.get_text(strip=True) for td in tr.find_all("td")]
@@ -93,7 +68,7 @@ def obtener_disponibilidad(fecha=None):
             break
 
     if not header:
-        raise Exception("No se detectaron doctores en la tabla")
+        raise Exception("No se detectaron doctores")
 
     cols = header.find_all("td")[1:]
     doctores = [td.get_text(strip=True) for td in cols]
@@ -121,57 +96,56 @@ def obtener_disponibilidad(fecha=None):
             rowspan = int(td.get("rowspan", "1"))
             boton = td.find("input", {"type": "submit"})
             if boton:
-                title = boton.get("title", "").strip()
                 value = boton.get("value", "").strip()
+                title = boton.get("title", "").strip()
                 texto_boton = title if title else value
                 if "Disponible" in texto_boton:
-                    match = re.search(r"(\d{1,2}:\d{2}\s+[ap]\.\s*m\.)", texto_boton)
-                    hora_encontrada = normalizar_hora(match.group(1)) if match else hora_actual
-                    if not es_hora_valida(hora_encontrada):
-                        continue
-                    doctor_asignado = next((d for d in doctores if d in title), doctor_columna)
-                    disponibles_por_doctor[doctor_asignado].append({
-                        "fecha": fecha_formateada,
-                        "hora": hora_encontrada,
-                        "detalle": title or "Disponible"
-                    })
+                    hora_del_boton = None
+                    match_boton = re.search(r"(\d{1,2}:\d{2}\s+[ap]\.\s*m\.)", texto_boton)
+                    if match_boton:
+                        hora_del_boton = normalizar_hora(match_boton.group(1))
+                        if not es_hora_valida(hora_del_boton):
+                            continue
+                    else:
+                        hora_del_boton = hora_actual
+                    doctor_asignado = None
+                    for doc_key in doctores:
+                        if doc_key in title:
+                            doctor_asignado = doc_key
+                            break
+                    if doctor_asignado is None:
+                        doctor_asignado = doctor_columna
+                    if doctor_asignado in disponibles_por_doctor:
+                        disponibles_por_doctor[doctor_asignado].append(f"{hora_actual} - {title}")
             active_rowspans[col_index] = rowspan - 1
             col_index += 1
 
-    return {
-        "fecha": fecha_formateada,
-        "disponibilidad": disponibles_por_doctor
+    # --- FILTRAR ---
+    disponibles_final = {
+        doc: [d for d in lista if es_hora_valida(d.split(" - ")[0])]
+        for doc, lista in disponibles_por_doctor.items()
     }
+    return disponibles_final
 
 # --- ENDPOINT GENERAL ---
 @app.route('/api/disponibilidad', methods=['GET'])
 def disponibilidad_general():
     try:
-        fecha = request.args.get("fecha")
-        resultado = obtener_disponibilidad(fecha)
-        return jsonify({
-            "status": "success",
-            "data": resultado
-        }), 200
+        data = obtener_disponibilidad()
+        return jsonify({"status": "success", "data": data}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# --- ENDPOINT POR DOCTOR ---
+# --- ENDPOINT FILTRADO POR DOCTOR ---
 @app.route('/api/disponibilidad/<doctor>', methods=['GET'])
 def disponibilidad_por_doctor(doctor):
     try:
-        fecha = request.args.get("fecha")
-        resultado = obtener_disponibilidad(fecha)
-        doctor = doctor.replace("_", " ")
-        data = resultado["disponibilidad"]
+        data = obtener_disponibilidad()
+        doctor = doctor.replace("_", " ")  # Permitir URL-friendly
         if doctor not in data:
-            return jsonify({
-                "status": "error",
-                "message": f"No se encontró al doctor '{doctor}' en la fecha solicitada."
-            }), 404
+            return jsonify({"status": "error", "message": f"No se encontró al doctor '{doctor}'"}), 404
         return jsonify({
             "status": "success",
-            "fecha": resultado["fecha"],
             "doctor": doctor,
             "disponibilidad": data[doctor]
         }), 200
@@ -182,4 +156,3 @@ def disponibilidad_por_doctor(doctor):
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
-
