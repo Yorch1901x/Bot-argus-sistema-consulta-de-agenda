@@ -191,14 +191,4 @@ Choose any license you prefer (MIT is commonly used).
 Add a LICENSE file if you want open-source distribution.
 
 ❤️ Author
-
-Your Name or Organization
-Medical appointment availability API for Clínica Luximed
-Built with Python and automation passion 🩵
-
-If you want, I can also generate:
-
-✅ A highly visual README with banners and badges
-✅ A version with diagrams (flowcharts or architecture)
-✅ A downloadable .md file
-Just let me know!
+Yorch1901x
